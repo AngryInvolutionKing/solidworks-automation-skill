@@ -362,6 +362,49 @@ def ensure_default_templates(sw):
     return templates
 
 
+def snapshot_open_documents(sw):
+    """
+    快照当前已打开的文档标题集合。
+
+    ISldWorks.GetDocuments 返回当前会话全部打开文档；部分版本在无文档时返回
+    None 而非空数组。标题是判定"新建结果"的稳定标识，因为 NewDocument 成功后
+    新文档尚未保存，GetPathName 为空字符串，无法用路径区分。
+    """
+    titles = set()
+    try:
+        documents = get_com_member(sw, "GetDocuments")
+    except Exception:
+        return titles
+    for document in documents or ():
+        try:
+            titles.add(str(get_com_member(document, "GetTitle")))
+        except Exception:
+            continue
+    return titles
+
+
+def _find_new_document(sw, preexisting_titles):
+    """
+    在新建文档后定位真正的新文档。
+
+    只返回标题不在 preexisting_titles 中的文档。绝不回退到裸 ActiveDoc：
+    当 NewDocument 失败或返回 None 时，ActiveDoc 可能是用户先前打开的另一个
+    文档，把它当作新建结果会让后续所有特征静默画到错误的文档上。
+    """
+    try:
+        documents = get_com_member(sw, "GetDocuments")
+    except Exception:
+        return None
+    for document in documents or ():
+        try:
+            title = str(get_com_member(document, "GetTitle"))
+        except Exception:
+            continue
+        if title and title not in preexisting_titles:
+            return document
+    return None
+
+
 def new_document(sw, doc_type="part", template_path=None):
     """
     创建新文档。
@@ -373,6 +416,11 @@ def new_document(sw, doc_type="part", template_path=None):
 
     返回:
         新建的 IModelDoc2 对象
+
+    异常:
+        RuntimeError: 无法创建文档。此前的实现会在 NewDocument 返回 None 时
+            盲取 sw.ActiveDoc，可能把用户已打开的文档误判为新建结果；现在改为
+            按文档标题差集定位，定位不到就显式报错。
     """
     doc_type, _ = normalize_doc_type(doc_type)
     if not template_path:
@@ -380,16 +428,32 @@ def new_document(sw, doc_type="part", template_path=None):
     else:
         template_path = _expand_path(template_path)
 
+    preexisting_titles = snapshot_open_documents(sw)
+
     model = sw.NewDocument(template_path, 0, 0, 0)
+    if model is not None:
+        # 正常路径：NewDocument 直接返回文档。仍需确认它确实是新文档，
+        # 避免个别版本返回陈旧引用。
+        try:
+            if str(get_com_member(model, "GetTitle")) in preexisting_titles:
+                model = None
+        except Exception:
+            pass
+
     if model is None:
-        for _ in range(20):
-            model = sw.ActiveDoc
+        # 退化路径：NewDocument 返回 None 时，按标题差集轮询新文档。
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            model = _find_new_document(sw, preexisting_titles)
             if model is not None:
                 break
             time.sleep(0.25)
 
     if model is None:
-        raise RuntimeError(f"创建{DOC_TYPE_LABELS.get(doc_type, doc_type)}文档失败，SolidWorks 未返回活动文档")
+        raise RuntimeError(
+            f"创建{DOC_TYPE_LABELS.get(doc_type, doc_type)}文档失败：SolidWorks 未返回新文档。"
+            f"请确认模板可用（{template_path}）且未弹出模态对话框阻塞自动化。"
+        )
 
     print(f"已创建新{DOC_TYPE_LABELS.get(doc_type, doc_type)}文档")
     return model
