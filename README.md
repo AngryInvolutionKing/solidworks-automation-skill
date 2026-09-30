@@ -398,9 +398,70 @@ claude mcp list
 }
 ```
 
-第一阶段已暴露 `solidworks_connect`、`solidworks_open_document`、`solidworks_save_document`、`solidworks_export_active`、`solidworks_review_active`、`solidworks_add_rotary_motor` 等工具；配置族新增 `solidworks_inspect_configurations`、`solidworks_create_configuration`、`solidworks_activate_configuration`。工程图子技能还暴露 `solidworks_generate_drawing`、`solidworks_review_drawing`、`solidworks_inspect_drawing`。CAD Studio 侧还暴露 `cadstudio_write_open_format`、`cadstudio_check_dfm`、`cadstudio_check_routing`、`cadstudio_fea_preflight`、`cadstudio_prepare_fea` 和 `cadstudio_review_advanced_geometry`。更多说明见 [mcp-server/README.md](mcp-server/README.md)。
+当前共暴露 **60 个工具**，按用途分组如下。
 
-当前 MCP 还包含 `solidworks_health_check`、`solidworks_create_basic_part`、`solidworks_add_component`、`solidworks_add_coincident_mate`、`solidworks_add_distance_mate`、`solidworks_add_concentric_mate`、`solidworks_set_component_fixed`、`solidworks_set_appearance` 等基础工具。复杂圆角/倒角仍建议作为后续专项优化，不作为基准 demo 的成功标准。
+**建模（机械工程师的主要入口）**
+
+| 工具 | 用途 |
+|---|---|
+| `solidworks_sketch_and_extrude` | 一次调用完成"画轮廓 + 拉伸"，可选切除或中面对称 |
+| `solidworks_revolve` | 旋转凸台 |
+| `solidworks_fillet` | 按**几何条件**选边倒圆角，支持 `dry_run` 预览 |
+| `solidworks_chamfer` | 按几何条件选边倒角 |
+| `solidworks_shell` | 抽壳，可选开口面 |
+| `solidworks_pattern` | 线性/圆周阵列已有特征 |
+| `solidworks_mirror_feature` | 镜像特征 |
+| `solidworks_list_edges` | 列出模型边线的长度/中点/方向/直径/凸凹 |
+| `solidworks_create_hole_feature` | 盲孔/通孔/沉头孔/锥沉孔/半圆槽 |
+
+圆角与倒角按 B-Rep 几何选边，不依赖 `SelectByID2` 的坐标魔法值——后者在模型
+修改后静默失效，是自动化脚本最常见的错误来源。详见
+[references/edge-selection.md](references/edge-selection.md)。
+
+**测量与自检**
+
+| 工具 | 用途 |
+|---|---|
+| `solidworks_mass_properties` | 质量、体积、表面积、质心、惯性矩 |
+| `solidworks_bounding_box` | 包围盒（判断能否放进箱体/托盘） |
+| `solidworks_interference_check` | 装配体干涉检查 |
+| `solidworks_document_units` | 读取或设置文档单位制 |
+
+**规格驱动建模**（可版本控制、幂等、自带验证）
+
+| 工具 | 用途 |
+|---|---|
+| `design_spec_validate` | 校验设计规格文件，不碰 SolidWorks |
+| `design_spec_build` | 按规格建零件并回读几何验证 |
+
+详见 [references/design-spec.md](references/design-spec.md)。
+
+**会话与文档**：`solidworks_health_check`、`solidworks_recover`（诊断并解除模态对话框
+阻塞）、`solidworks_connect`、`solidworks_new_document`、`solidworks_open_document`、
+`solidworks_save_document`、`solidworks_close_documents`、`solidworks_export_active`、
+`solidworks_batch_export_files`、`solidworks_review_active`、`solidworks_create_basic_part`。
+
+**装配**：`solidworks_add_component`、`solidworks_add_coincident_mate`、
+`solidworks_add_distance_mate`、`solidworks_add_concentric_mate`、
+`solidworks_set_component_fixed`、`solidworks_export_assembly_bom`、`solidworks_pack_and_go`。
+
+**配置与属性**：`solidworks_inspect_configurations`、`solidworks_create_configuration`、
+`solidworks_activate_configuration`、`solidworks_update_dimension`、
+`solidworks_set_custom_properties`、`solidworks_set_appearance`。
+
+**工程图**：`solidworks_generate_drawing`、`solidworks_review_drawing`、
+`solidworks_inspect_drawing`。
+
+**运动**：`solidworks_add_rotary_motor`、`solidworks_inspect_motion_studies`、
+`solidworks_validate_motion_study`。
+
+**CAD Studio 侧**：`cadstudio_write_open_format`、`cadstudio_check_dfm`、
+`cadstudio_check_routing`、`cadstudio_fea_preflight`、`cadstudio_prepare_fea`、
+`cadstudio_run_fea`、`cadstudio_run_fea_convergence`、
+`cadstudio_review_advanced_geometry`、`cadstudio_create_ocp_loft`、
+`cadstudio_create_ocp_surface`。
+
+更多说明见 [mcp-server/README.md](mcp-server/README.md)。
 
 ### 🎯 使用示例
 

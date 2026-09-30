@@ -2,6 +2,7 @@
 SolidWorks 零件建模工具
 提供草图绘制和特征创建的常用函数
 """
+import weakref
 from dataclasses import dataclass
 from contextlib import contextmanager
 
@@ -11,6 +12,27 @@ try:
 except ImportError:
     from sw_connect import get_com_member
     from sw_preflight import import_com_dependencies
+
+
+def _callout_variant():
+    """
+    构造 Select4 需要的空 Callout（Dispatch VARIANT）。
+
+    sw_connect.create_empty_dispatch_variant 在测试替身里可能不存在，因此这里做
+    防御式导入而不是模块级硬依赖：缺它就退回 None，Select4 仍可用（只是部分版本
+    会报类型不匹配，此时 Select2 才是首选路径）。
+    """
+    try:
+        from sw_connect import create_empty_dispatch_variant  # type: ignore
+    except ImportError:
+        try:
+            from .sw_connect import create_empty_dispatch_variant  # type: ignore
+        except ImportError:
+            return None
+    try:
+        return create_empty_dispatch_variant()
+    except Exception:
+        return None
 
 pythoncom, _win32com, VARIANT = import_com_dependencies()
 
@@ -50,8 +72,118 @@ class SketchSelectionRef:
         """保持与旧代码中普通草图名称字符串相近的表现。"""
         return self.name
 
+    def __eq__(self, other):
+        """与草图名字符串比较时按名称等价，保持向后兼容。"""
+        if isinstance(other, SketchSelectionRef):
+            return self.name == other.name
+        if isinstance(other, str):
+            return self.name == other
+        return NotImplemented
+
+    def __hash__(self):
+        return hash(self.name)
+
+
+class _SketchCacheEntry:
+    """
+    单个文档的草图选择缓存条目。
+
+    同时保留 model 的弱引用与 ``_oleobj_`` 的标识，用于判定缓存是否仍然对应当前
+    文档。仅用 ``id(ole_object)`` 作键是不可靠的：COM 代理被 GC 后 CPython 会复用
+    内存地址，旧条目可能错误命中新文档，从而把草图特征建到错误的文档上。
+    """
+
+    __slots__ = ("model_ref", "ole_id", "sketches", "fingerprint")
+
+    def __init__(self, model, ole_id):
+        self.model_ref = _weak_model(model)
+        self.ole_id = ole_id
+        self.sketches = {}
+        self.fingerprint = None
+
+    def matches(self, model, ole_id):
+        """@brief 判断该条目是否仍对应当前模型。"""
+        if ole_id is not None and self.ole_id is not None:
+            if ole_id != self.ole_id:
+                return False
+        if self.model_ref is None:
+            # 该版本 COM 代理不支持弱引用，只能依赖 _oleobj_ 标识。
+            return ole_id is not None and ole_id == self.ole_id
+        alive = self.model_ref()
+        if alive is None:
+            return False
+        return alive is model
+
+
+def _weak_model(model):
+    """@brief 尽力创建模型的弱引用；不支持时返回 None。"""
+    try:
+        return weakref.ref(model)
+    except TypeError:
+        return None
+
+
+def _document_fingerprint(model):
+    """
+    读取所属文档的指纹（标题 + 路径）。
+
+    用于检测"当前活动文档已经换成别的文档"，此时旧缓存必须整体失效。
+    """
+    try:
+        document = get_com_member(model, "GetTitle"), get_com_member(model, "GetPathName")
+    except Exception:
+        return None
+    return document
+
 
 _SKETCH_SELECTION_CACHE = {}
+_SKETCH_CACHE_LIMIT = 32
+
+
+def clear_sketch_selection_cache(model=None):
+    """
+    清理草图选择缓存。
+
+    参数:
+        model: 指定文档时只清理该文档的条目；None 时清空全部。
+
+    说明:
+        长跑进程（例如常驻 MCP server）必须调用本函数，否则缓存会一直持有已关闭
+        文档的 ISketch COM 对象，导致 SolidWorks 侧无法释放文档。
+    """
+    if model is None:
+        _SKETCH_SELECTION_CACHE.clear()
+        return
+    key = _model_cache_key(model)
+    _SKETCH_SELECTION_CACHE.pop(key, None)
+
+
+def _prune_sketch_cache():
+    """@brief 淘汰已失效条目；条目数超限时按插入顺序丢弃最旧项。"""
+    for key, entry in list(_SKETCH_SELECTION_CACHE.items()):
+        if entry.model_ref is not None and entry.model_ref() is None:
+            _SKETCH_SELECTION_CACHE.pop(key, None)
+    while len(_SKETCH_SELECTION_CACHE) > _SKETCH_CACHE_LIMIT:
+        try:
+            _SKETCH_SELECTION_CACHE.pop(next(iter(_SKETCH_SELECTION_CACHE)))
+        except StopIteration:
+            break
+
+
+def _get_sketch_cache_entry(model, create=False):
+    """@brief 取得（或创建）当前模型的缓存条目，自动识别文档切换。"""
+    ole_id = _model_cache_key(model)
+    entry = _SKETCH_SELECTION_CACHE.get(ole_id)
+    if entry is not None and entry.matches(model, ole_id) and entry.fingerprint == _document_fingerprint(model):
+        return entry
+    if not create:
+        return None
+    # 文档已切换或地址已被复用：丢弃旧条目，避免跨文档误命中。
+    _prune_sketch_cache()
+    entry = _SketchCacheEntry(model, ole_id)
+    entry.fingerprint = _document_fingerprint(model)
+    _SKETCH_SELECTION_CACHE[ole_id] = entry
+    return entry
 
 
 # ============================================================
@@ -158,9 +290,9 @@ def _cache_sketch_ref(model, sketch_ref):
     """缓存草图对象引用，后续可跳过 SelectByID2("SKETCH")。"""
     if not sketch_ref or not sketch_ref.name:
         return sketch_ref
-    model_cache = _SKETCH_SELECTION_CACHE.setdefault(_model_cache_key(model), {})
+    entry = _get_sketch_cache_entry(model, create=True)
     for candidate in _cache_name_variants(sketch_ref.name):
-        model_cache[candidate] = sketch_ref
+        entry.sketches[candidate] = sketch_ref
     return sketch_ref
 
 
@@ -169,9 +301,11 @@ def _find_cached_sketch_ref(model, sketch_name):
     if isinstance(sketch_name, SketchSelectionRef):
         return sketch_name
 
-    model_cache = _SKETCH_SELECTION_CACHE.get(_model_cache_key(model), {})
+    entry = _get_sketch_cache_entry(model, create=False)
+    if entry is None:
+        return None
     for candidate in _cache_name_variants(sketch_name):
-        cached = model_cache.get(candidate)
+        cached = entry.sketches.get(candidate)
         if cached:
             return cached
     return None
@@ -390,15 +524,21 @@ def sketch(model, plane_name="Front Plane"):
     草图上下文管理器。
 
     示例:
-        with sketch(model, "Front Plane") as sketch_name:
+        with sketch(model, "Front Plane") as sketch_ref:
             sketch_circle(model, 0, 0, mm(25))
-        extrude_boss(model, sketch_name, mm(50))
+        extrude_boss(model, sketch_ref, mm(50))
+
+    产出值:
+        SketchSelectionRef。它保留了草图对象引用和轮廓/区域集合，后续特征可直接
+        用对象自身 Select2 建立选择集，无需依赖 SelectByID2 按名称反查——后者在
+        中文版或重建后可能持续返回 False。它的 __str__ 返回草图名，所以把它当
+        字符串传给旧代码（例如 "Sketch1" 的比较或格式化）同样成立。
     """
     start_sketch(model, plane_name)
     sketch_ref = None
     try:
         sketch_ref = _capture_sketch_ref(model, source="context")
-        yield sketch_ref.name if sketch_ref else current_sketch_name(model)
+        yield sketch_ref if sketch_ref else current_sketch_name(model)
     finally:
         finished_ref = end_sketch(model)
         if sketch_ref and finished_ref:
@@ -722,16 +862,40 @@ def revolve_boss(model, sketch_name, angle_rad, axis_sketch_name=None):
 
 def fillet(model, radius, edges=None):
     """
-    倒圆角
+    倒圆角（恒定半径）。
 
     参数:
         model: IModelDoc2
         radius: 圆角半径（米）
-        edges: 预先选择的边线列表，None 则使用当前选择
+        edges: 预先选择的边线列表，None 则使用当前选择集
+
+    返回:
+        IFeature 或 None。
+
+    说明:
+        IFeatureManager::FeatureFillet 只接受 4 个参数：
+        ``(Options, Radius, R1, R2)``。传 7 个参数（在末尾补 None）会在
+        SolidWorks 2024/2026 上抛 "非选择性的参数"（0x8002000F），这是旧文档和
+        早期封装误导的地方——已在真机实测确认。
+
+        调用前必须先建立边线选择集；选择集为空时 SolidWorks 会对"当前轮廓"
+        执行圆角，产生难以排查的错误特征。因此这里显式校验选择集。
     """
-    return model.FeatureManager.FeatureFillet(
-        195, radius, 0, 0, None, None, None
-    )
+    if edges is not None:
+        for edge in edges:
+            try:
+                edge.Select2(True, 0)
+            except Exception:
+                try:
+                    edge.Select4(True, _callout_variant())
+                except Exception:
+                    continue
+    if _get_selection_count(model) <= 0:
+        raise ValueError(
+            "圆角需要先选择边线。请用 select_edges() 按几何条件选边，"
+            "或用 solidworks_list_edges 查看可用边线。"
+        )
+    return model.FeatureManager.FeatureFillet(195, radius, 0, 0)
 
 
 def chamfer(model, distance, angle_deg=45):
