@@ -4,6 +4,8 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![SolidWorks](https://img.shields.io/badge/SolidWorks-2024--2026-red.svg)](https://www.solidworks.com/)
 
+> **定位**：AI Skill + MCP toolkit for reliable desktop CAD automation。三个入口（Skill / MCP / CAD Studio）不变；内部可靠执行、自动验证与失败恢复对用户透明，无需额外启动服务。
+
 CAD Studio 桌面端与 Skill/CLI/MCP 是平级入口：这个仓库同时可以作为 Skill 包和 MCP Server 使用。Skill 适合导入支持 skills 的客户端，MCP 适合做本地工具连接；两者共用同一套能力和脚本。实际可执行范围以根目录 `capabilities.yaml` 为唯一真源；未验证能力不会被包装成已完成的无人值守交付。
 
 > 可靠性边界：当前真机基线为 SolidWorks 2024、SolidWorks 2026 SP01.1 和 AutoCAD 2024。SolidWorks 2026 仅对能力清单中列出 2026 的能力视为已验证；SolidWorks 2025 及其余未回归能力仍是兼容性目标。配置族、钣金 U 型轮廓法兰/展开 DXF，以及 HSS 矩形焊接框架/切割清单已进入 `pilot`；设计表与复杂钣金/焊件仍是兼容目标。C# Add-in 宿主已在 SW2026 SP1.1 完成进程内 callback、应用事件、CommandGroup、TaskPane、PropertyManagerPage 和 JSON 诊断回归；正式部署必须使用 64 位 RegAsm `/codebase /tlb`。Simulation/FEA、Routing、复杂曲面和模具也处于受控 `pilot` 门禁，不能冒充原生完整交付。
@@ -310,6 +312,50 @@ solidworks-automation-skill/
 ├── SUBSKILLS.md         # 多子技能索引和路由说明
 └── README.md
 ```
+
+## 🏗️ V2 架构（内部，用户无需感知）
+
+> **一句话**：LLM 负责思考，Skill 负责知识，MCP 负责协议，Execution Core 负责「执行受控、可验证、可恢复、可追踪」。
+
+```text
+User → Codex / Claude / Cursor / OpenClaw
+  → Skill / MCP
+  → Execution Core（Capability · State · Verification · Recovery Decision · Trace）
+  → Backend Router（capabilities.yaml）
+  → Python COM / C# PIA / OCCT / ...
+  → 外部 CAD 软件
+  → Artifacts + Evidence
+```
+
+- **Skill** = 领域知识 / SOP / 开放能力规则
+- **MCP** = 标准 Tool Protocol
+- **Capability Registry** = 现有 `capabilities.yaml`（唯一真源）
+- **Backend Router** = 按能力 / 环境 / 版本选择执行后端
+- **Execution Core** = 内部可靠执行层：不是独立服务、不是 daemon、不是第四个入口、不替代上层 Agent 的 Planning
+- **Reviewer** = 结果验证（Tool Success ≠ Task Success）
+- **Recovery Decision** = 失败分类与决策（本版本只做决策，不默认自动 retry / fallback / replan）
+- **Trace** = 追加式执行历史（复用 `queue/events/`；Artifact Ledger 仍是交付事实源）
+- **Golden Workflow Eval** = 可靠性基准
+
+### 🛡️ 可靠性基准（deterministic）
+
+| 指标 | 值 |
+|---|---|
+| Nominal First-Pass Success | 100% (11/11) |
+| Nominal Task Success | 100% |
+| Failure Detection | 100% |
+| Policy Block Accuracy | 100% |
+| Capability Gap Accuracy | 100% |
+| Backend Fallback Accuracy | 100% |
+| False-Completion Detection | 100% |
+| Escaped False-Completion | 0% |
+| Scenarios | 37 |
+
+> 以上来自 **deterministic execution reliability benchmark**（Fake Handler / Reviewer +
+> 故障注入场景，验证执行控制逻辑），**不是**真实用户成功率、真实 SolidWorks 全场景成功率、
+> LLM 智能水平或生产 SLA。`Escaped False-Completion = 0%` 表示「Tool 报成功但验证失败」的
+> 假成功**零泄漏**；`False-Completion Detection = 100%` 表示注入的假成功候选全部被 Verification
+> 拦截。详见 [`docs/architecture/v2-evaluation.md`](docs/architecture/v2-evaluation.md)。
 
 ### 🖥️ CAD Studio 桌面软件
 
@@ -720,6 +766,10 @@ The `solidworks-engineering-drawing` subskill runs a public-domain NIST test art
 - 📝 **Custom Properties** - Read/write file properties, configuration management
 - 👀 **CAD Agent Self-Review** - Export multi-view previews, JSON reports, Markdown summaries, and `pass/warn/fail` evaluations
 - 🔎 **Verified API Workflow** - Look up official API Help or local SDK docs before using unwrapped SolidWorks APIs
+
+### 🏗️ Architecture & Reliability (V2)
+
+An AI Skill + MCP toolkit for reliable desktop CAD automation. Entry points are unchanged (Skill / MCP / CAD Studio); a thin internal **Execution Core** adds traceable, verifiable, safely-recoverable execution with no extra service to start. Deterministic reliability benchmark (37 scenarios, Fake Handler/Reviewer): Nominal First-Pass 100%, Failure Detection 100%, False-Completion Detection 100%, **Escaped False-Completion 0%** — synthetic benchmark, not a production SLA.
 
 ### 📋 Requirements
 

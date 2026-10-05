@@ -1109,6 +1109,62 @@ MOCK_HANDLERS: Mapping[str, JobHandler] = {
 DEFAULT_HANDLERS: Mapping[str, JobHandler] = {"dfm_review": run_dfm_review_job}
 
 
+def _primary_capability(job: dict[str, Any]) -> str | None:
+    """@brief 取任务声明的首个能力 ID（供 Execution Core 做上下文）。"""
+    capabilities = job.get("capabilities")
+    if isinstance(capabilities, list) and capabilities:
+        return str(capabilities[0])
+    return None
+
+
+def _execute_handler_with_core(handler: JobHandler, kind: str, job: dict[str, Any], path: Path) -> dict[str, Any]:
+    """@brief 用 Execution Core 包裹 handler 调用（兼容优先，异常原样上抛）。"""
+    try:
+        from core.execution import execute_with_core
+    except Exception:
+        # Execution Core 不可用时回退到原有 handler 直调，不改变生产行为。
+        return handler(job)
+    assessment = execute_with_core(
+        handler=handler,
+        handler_arg=job,
+        run_id=str(job.get("id") or "unknown"),
+        tool_name=str(kind),
+        capability_id=_primary_capability(job),
+        requires_review=False,
+        trace_dir=path.parent,
+    )
+    job["executionAssessment"] = assessment.to_dict()
+    if assessment.exception is not None:
+        raise assessment.exception
+    return assessment.raw_result
+
+
+def _record_verification_assessment(path: Path, job: dict[str, Any], review: dict[str, Any]) -> None:
+    """@brief 用 Verification/Recovery Adapter 标准化既有 Reviewer Gate 结果（sidecar，不改终态）。"""
+    try:
+        from core.recovery import decide
+        from core.verification import verify
+    except Exception:
+        return
+    run_id = str(job.get("id") or "unknown")
+    capability_id = _primary_capability(job)
+    verification = verify(
+        reviewer_result=review,
+        capability_id=capability_id,
+        trace_dir=path.parent,
+        run_id=run_id,
+    )
+    job["verificationAssessment"] = verification.to_dict()
+    decision = decide(
+        verification_result=verification.to_dict(),
+        capability_id=capability_id,
+        trace_dir=path.parent,
+        run_id=run_id,
+    )
+    if decision is not None:
+        job["recoveryDecision"] = decision.to_dict()
+
+
 def process_job(
     path: Path,
     handlers: Mapping[str, JobHandler] | None = None,
@@ -1158,7 +1214,7 @@ def process_job(
         append_event(path.parent, job, "step.started", "任务执行开始")
 
         job["_runtime"] = {"jobPath": str(path), "runnerId": job.get("runnerId"), "leaseSeconds": lease_seconds}
-        result = active_handlers[kind](job)
+        result = _execute_handler_with_core(active_handlers[kind], kind, job, path)
         if is_cancel_requested(path):
             raise JobCancelled("任务已请求取消")
         job.pop("_runtime", None)
@@ -1178,6 +1234,7 @@ def process_job(
         job["reviewGate"] = review
         job["reviewGatePath"] = review["reviewPath"]
         append_event(path.parent, job, "review.gate_completed", "Reviewer Gate 已完成", {"status": review["status"], "reviewPath": review["reviewPath"]})
+        _record_verification_assessment(path, job, review)
         if review["status"] == "fail":
             message = "交付文件检查未通过，任务不可交付。请查看复核记录并修正。"
             job["error"] = message
