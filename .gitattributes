@@ -1,0 +1,10 @@
+# Shell scripts must keep LF line endings: they run inside the Linux cloud container
+# and in Git Bash locally. Global core.autocrlf=true would otherwise check them out as CRLF.
+*.sh text eol=lf
+
+# Workflow files are also executed as shell on the runner.
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Python: normal text handling (git decides storage; no forced conversion).
+*.py text
