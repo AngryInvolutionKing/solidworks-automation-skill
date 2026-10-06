@@ -20,6 +20,9 @@ Codex Cloud 环境跑在 Linux 容器里（默认 `universal` 镜像）：没有
    或依赖 AutoCAD / OCP / Windows 路径）。
 3. **跨平台测试用 `bash cloud/run-tests.sh`**，它显式列出与平台无关的 6 个 core + 3 个 eval 测试文件
    （预期 `125 passed`）。
+4. **不要 `import scripts.*`**。`scripts/__init__.py` 无条件导入 COM 模块（`sw_connect` → `sw_preflight`），
+   在 Linux 上必然抛 `DependencyInstallDeclined`。core/eval 测试之所以能跑，是因为它们把 `scripts/`
+   加进 `sys.path` 后以顶层包形式 `import core.*` / `evals.*`，绕开了包 `__init__`。云端冒烟测试也照此写。
 
 ## 只能在本地验的部分
 

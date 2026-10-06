@@ -18,12 +18,16 @@ python3 -m pip install --quiet \
   "jsonschema>=4.20,<5" \
   "pytest>=8"
 
-# Cheap import smoke: the execution core must load on a bare Linux interpreter.
+# Cheap import smoke: mirror the import style of the cross-platform tests, which put
+# `scripts/` on sys.path and import `core.*` as top-level packages.
+# Do NOT import `scripts.core.execution` here: that executes scripts/__init__.py, which
+# eagerly imports the COM modules (sw_connect -> sw_preflight) and always raises
+# DependencyInstallDeclined on Linux.
 python3 - <<'PY'
 import sys
-sys.path.insert(0, ".")
-import scripts.core.execution  # noqa: F401
-print("setup ok: scripts.core.execution importable")
+sys.path.insert(0, "scripts")
+import core.capability, core.execution, core.recovery, core.state, core.trace, core.verification  # noqa: F401
+print("setup ok: execution core importable (COM-free path)")
 PY
 
 echo "setup ok: run 'bash cloud/run-tests.sh' for the deterministic cross-platform suite"
