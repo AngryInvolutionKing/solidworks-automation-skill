@@ -1,0 +1,18 @@
+name: linux-tests
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  deterministic:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Environment setup (cloud setup script)
+        run: bash cloud/setup.sh
+      - name: Deterministic cross-platform suite
+        run: bash cloud/run-tests.sh
